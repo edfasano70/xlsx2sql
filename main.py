@@ -10,11 +10,13 @@ from openpyxl import load_workbook
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QIcon, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -24,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 PROGRAM_NAME = "xlsx2sql"
-PROGRAM_VERSION = "0.1.1"
+PROGRAM_VERSION = "0.2.0"
 PROGRAM_DESCRIPTION = "Convierte archivos Excel (.xlsx) en sentencias SQL INSERT"
 
 RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
@@ -53,9 +55,11 @@ DARK_STYLE = """
 
 INSTRUCTIONS_TEXT = (
     "1. Pulsa «Abrir Excel...» (Ctrl+O) y selecciona un archivo .xlsx.\n"
-    "2. La aplicación lee cada hoja y genera un INSERT por fila.\n"
-    "3. Revisa el SQL en el panel y, si quieres, edítalo.\n"
+    "2. Elige en la ventana emergente la tabla (hoja) que quieras convertir.\n"
+    "3. Revisa el SQL generado; puedes editarlo.\n"
     "4. Pulsa «Guardar SQL...» (Ctrl+S) para guardarlo en un archivo .sql.\n\n"
+    "Marca «Opciones > Incluir CREATE TABLE» para generar también la sentencia "
+    "CREATE TABLE.\n"
     "Cada hoja se convierte en una tabla con el mismo nombre. "
     "Las filas completamente vacías se omiten."
 )
@@ -100,8 +104,65 @@ def sql_value(value, data_type: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def generate_insert_statements(excel_file_path: str) -> list[str]:
+def list_sheet_names(excel_file_path: str) -> list[str]:
+    """Devuelve los nombres de las hojas (tablas) del archivo Excel."""
+    workbook = load_workbook(excel_file_path, read_only=True)
+    return workbook.sheetnames
+
+
+def _column_type(cells: list[tuple]) -> str:
+    """Infiera un tipo SQL simple a partir de las celdas de una columna."""
+    has_data = False
+    all_integer = True
+    all_numeric = True
+    all_boolean = True
+    all_date = True
+
+    for value, data_type in cells:
+        if value is None:
+            continue
+        has_data = True
+        if data_type == "b":
+            all_integer = False
+            all_numeric = False
+            all_date = False
+        elif data_type == "n":
+            all_boolean = False
+            all_date = False
+            if isinstance(value, float) and not value.is_integer():
+                all_integer = False
+        elif data_type == "d" or isinstance(value, (datetime, date)):
+            all_integer = False
+            all_numeric = False
+            all_boolean = False
+        else:
+            all_integer = False
+            all_numeric = False
+            all_boolean = False
+            all_date = False
+
+    if not has_data:
+        return "TEXT"
+    if all_boolean:
+        return "BOOLEAN"
+    if all_integer:
+        return "INTEGER"
+    if all_numeric:
+        return "REAL"
+    if all_date:
+        return "DATE"
+    return "TEXT"
+
+
+def generate_insert_statements(
+    excel_file_path: str,
+    sheet_names: list[str] | None = None,
+    include_create: bool = False,
+) -> list[str]:
     """Lee un Excel y devuelve la lista de sentencias INSERT.
+
+    Si `sheet_names` se indica, solo se convierten esas hojas.
+    Si `include_create` es True, se antepone un CREATE TABLE IF NOT EXISTS por hoja.
 
     Usa openpyxl directamente para respetar el tipo real de cada celda
     (pandas convertiría códigos como phone/token a números y perdería
@@ -111,6 +172,8 @@ def generate_insert_statements(excel_file_path: str) -> list[str]:
     statements: list[str] = []
 
     for worksheet in workbook.worksheets:
+        if sheet_names is not None and worksheet.title not in sheet_names:
+            continue
         rows = list(worksheet.iter_rows())
         if not rows:
             continue
@@ -129,6 +192,13 @@ def generate_insert_statements(excel_file_path: str) -> list[str]:
 
         table = quote_identifier(worksheet.title)
         columns = ", ".join(quote_identifier(headers[i].value) for i in valid_indexes)
+
+        if include_create:
+            column_defs = []
+            for i in valid_indexes:
+                cells = [(row[i].value, row[i].data_type) for row in rows[1:]]
+                column_defs.append(f"{quote_identifier(headers[i].value)} {_column_type(cells)}")
+            statements.append(f"CREATE TABLE IF NOT EXISTS {table} ({', '.join(column_defs)});")
 
         for row in rows[1:]:
             values = [sql_value(row[i].value, row[i].data_type) for i in valid_indexes]
@@ -174,13 +244,21 @@ class AboutDialog(QDialog):
                 logo_label.setPixmap(pixmap)
         layout.addWidget(logo_label)
 
-        title_label = QLabel(f"<b>{PROGRAM_NAME}</b> {PROGRAM_VERSION}")
+        title_label = QLabel(f"<b>{PROGRAM_NAME}</b>")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
+
+        version_label = QLabel(f"Versión {PROGRAM_VERSION}")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(version_label)
 
         description_label = QLabel(PROGRAM_DESCRIPTION)
         description_label.setWordWrap(True)
         layout.addWidget(description_label)
+
+        author_label = QLabel("Programado por @EdFasano70")
+        author_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(author_label)
 
         close_button = QPushButton("Cerrar")
         close_button.clicked.connect(self.accept)
@@ -211,10 +289,59 @@ class HelpDialog(QDialog):
             self.setStyleSheet(DARK_STYLE)
 
 
+class SheetSelectionDialog(QDialog):
+    def __init__(
+        self,
+        sheet_names: list[str],
+        parent: QWidget | None = None,
+        dark_mode: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.selected_sheet: str | None = None
+        self.setWindowTitle("Seleccionar tabla")
+        self.setWindowIcon(_icon("build"))
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+
+        label = QLabel("Selecciona la tabla a convertir:")
+        layout.addWidget(label)
+
+        self.sheet_list = QListWidget()
+        self.sheet_list.addItems(sheet_names)
+        self.sheet_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        if sheet_names:
+            self.sheet_list.setCurrentRow(0)
+        self.sheet_list.itemDoubleClicked.connect(lambda _item: self._accept())
+        layout.addWidget(self.sheet_list)
+
+        buttons = QHBoxLayout()
+        cancel_button = QPushButton("Cancelar")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(cancel_button)
+
+        ok_button = QPushButton("Convertir")
+        ok_button.setDefault(True)
+        ok_button.clicked.connect(self._accept)
+        buttons.addWidget(ok_button)
+
+        layout.addLayout(buttons)
+
+        if dark_mode:
+            self.setStyleSheet(DARK_STYLE)
+
+    def _accept(self) -> None:
+        item = self.sheet_list.currentItem()
+        if item is not None:
+            self.selected_sheet = item.text()
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.dark_mode = False
+        self.include_create = False
         self.excel_path: Path | None = None
 
         self.setWindowTitle(PROGRAM_NAME)
@@ -277,6 +404,14 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        options_menu = menu_bar.addMenu("Opciones")
+
+        self.create_table_action = QAction("Incluir CREATE TABLE", self)
+        self.create_table_action.setCheckable(True)
+        self.create_table_action.setChecked(self.include_create)
+        self.create_table_action.toggled.connect(self._set_include_create)
+        options_menu.addAction(self.create_table_action)
+
         view_menu = menu_bar.addMenu("Ver")
         self.dark_mode_action = QAction(_icon("brightness_6"), "Alternar modo oscuro/claro", self)
         self.dark_mode_action.triggered.connect(self.toggle_dark_mode)
@@ -299,20 +434,46 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         self.excel_path = Path(filename)
-        self.convert()
+        self._choose_sheet_and_convert()
 
     def convert(self) -> None:
         if self.excel_path is None:
             self.open_excel()
             return
+        self._choose_sheet_and_convert()
+
+    def _choose_sheet_and_convert(self) -> None:
         try:
-            statements = generate_insert_statements(str(self.excel_path))
+            sheet_names = list_sheet_names(str(self.excel_path))
+        except Exception as exc:  # noqa: BLE001 - mostrar cualquier error al usuario
+            QMessageBox.critical(self, "Error", f"No se pudo leer el archivo:\n{exc}")
+            return
+
+        if not sheet_names:
+            QMessageBox.information(
+                self, "Sin tablas", "El archivo no contiene hojas para convertir."
+            )
+            return
+
+        dialog = SheetSelectionDialog(sheet_names, self, dark_mode=self.dark_mode)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected_sheet is None:
+            self.statusBar().showMessage("Conversión cancelada")
+            return
+
+        try:
+            statements = generate_insert_statements(
+                str(self.excel_path),
+                [dialog.selected_sheet],
+                include_create=self.include_create,
+            )
         except Exception as exc:  # noqa: BLE001 - mostrar cualquier error al usuario
             QMessageBox.critical(self, "Error", f"No se pudo convertir el archivo:\n{exc}")
             return
+
         self.editor.setPlainText("\n".join(statements))
         self.statusBar().showMessage(
-            f"{len(statements)} sentencias generadas desde {self.excel_path.name}"
+            f"{len(statements)} sentencias generadas desde "
+            f"{dialog.selected_sheet} de {self.excel_path.name}"
         )
 
     def save_sql(self) -> None:
@@ -330,6 +491,9 @@ class MainWindow(QMainWindow):
 
     def toggle_dark_mode(self) -> None:
         self._apply_dark_mode(not self.dark_mode)
+
+    def _set_include_create(self, enabled: bool) -> None:
+        self.include_create = enabled
 
     def show_instructions(self) -> None:
         HelpDialog(self, dark_mode=self.dark_mode).exec()
@@ -373,6 +537,11 @@ class MainWindow(QMainWindow):
         if dark_mode is not None:
             self._apply_dark_mode(dark_mode.lower() == "true")
 
+        include_create = root.findtext("settings/include_create")
+        if include_create is not None:
+            self._set_include_create(include_create.lower() == "true")
+            self.create_table_action.setChecked(self.include_create)
+
     def _save_preferences(self) -> None:
         root = ET.Element(PROGRAM_NAME)
         window = ET.SubElement(root, "window")
@@ -382,6 +551,7 @@ class MainWindow(QMainWindow):
         ET.SubElement(window, "height").text = str(self.height())
         settings = ET.SubElement(root, "settings")
         ET.SubElement(settings, "dark_mode").text = str(self.dark_mode).lower()
+        ET.SubElement(settings, "include_create").text = str(self.include_create).lower()
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ")
         tree.write(CONFIG_FILE, encoding="utf-8", xml_declaration=True)
