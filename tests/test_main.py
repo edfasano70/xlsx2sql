@@ -129,3 +129,13 @@ def test_include_create_preference_persisted(qapp):
 
     restored = MainWindow()
     assert restored.include_create is True
+
+
+def test_save_preferences_creates_config_dir(qapp, monkeypatch, tmp_path):
+    target = tmp_path / "nested" / "config.xml"
+    monkeypatch.setattr(main, "CONFIG_FILE", target)
+
+    window = MainWindow()
+    window._save_preferences()
+
+    assert target.exists()

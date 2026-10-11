@@ -9,7 +9,8 @@ sentencias SQL `INSERT`.
 - Respeta el tipo real de cada celda (números sin comillas, textos con comillas,
   `NULL` para celdas vacías, booleanos como `1`/`0`, fechas en formato ISO).
 - Escapa comillas simples y descarta filas completamente vacías.
-- Tema claro/oscuro y persistencia de la geometría de la ventana en `config.xml`.
+- Tema claro/oscuro y persistencia de la geometría de la ventana en
+  `~/.config/xlsx2sql/config.xml`.
 
 ## Uso
 

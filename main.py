@@ -26,14 +26,15 @@ from PyQt6.QtWidgets import (
 )
 
 PROGRAM_NAME = "xlsx2sql"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.2.1"
 PROGRAM_DESCRIPTION = "Convierte archivos Excel (.xlsx) en sentencias SQL INSERT"
 
 RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
 ICONS_DIR = RESOURCES_DIR / "icons"
 LOGO_FILE = RESOURCES_DIR / "logo.png"
 
-CONFIG_FILE = Path(__file__).resolve().parent / "config.xml"
+CONFIG_DIR = Path.home() / ".config" / PROGRAM_NAME
+CONFIG_FILE = CONFIG_DIR / "config.xml"
 
 # Identificadores SQL seguros: letras, números y guiones bajos (empezando por letra o _)
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -554,6 +555,7 @@ class MainWindow(QMainWindow):
         ET.SubElement(settings, "include_create").text = str(self.include_create).lower()
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ")
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         tree.write(CONFIG_FILE, encoding="utf-8", xml_declaration=True)
 
     def closeEvent(self, event) -> None:

@@ -2,6 +2,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-config.xml
 data_prueba.xlsx
 insert_statements.sql
